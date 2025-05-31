@@ -3,6 +3,12 @@ from flask_cors import CORS
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
+from vector_db import VectorDB
+from data_store import populate_vector_db_from_file
+import logging
+
+# Configure logging - this will apply to Flask's default logger as well
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Load environment variables
 load_dotenv()
@@ -14,9 +20,18 @@ CORS(app)  # Enable CORS for all routes
 # Initialize OpenAI client
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
+# Initialize VectorDB and populate it
+vector_db = VectorDB()
+if vector_db.collection:
+    logging.info("VectorDB collection initialized, proceeding to populate.")
+    # Assuming social_phobia_info.txt is in the same directory or accessible path
+    populate_vector_db_from_file(vector_db_instance=vector_db, file_path="social_phobia_info.txt")
+else:
+    logging.warning("VectorDB collection is not initialized. Context retrieval will be skipped and data population is aborted.")
+
 # Define system prompt
 system_prompt = """
-You are a supportive, emotionally intelligent chatbot designed to provide comfort and genuine help. Your primary goal is to make users feel better after talking with you, not worse.
+You are a supportive, emotionally intelligent chatbot designed to provide comfort and genuine help. Your primary goal is to make users feel better after talking with you, not worse. If 'Context from knowledge base:' is provided with the user message, prioritize using this information to make your response more relevant and helpful. However, continue to adhere to all other critical guidelines.
 
 CRITICAL GUIDELINES:
 1. PROVIDE ACTUAL HELP: When users express discomfort or negative emotions, offer genuine comfort and practical suggestions rather than just asking more questions.
@@ -47,11 +62,28 @@ def chat():
         
         if not user_message:
             return jsonify({"error": "No message provided"}), 400
-            
+
+        # Query ChromaDB for relevant documents
+        enriched_user_message = user_message
+        if vector_db.collection: # Only query if collection is available
+            try:
+                retrieved_info = vector_db.query_texts(query_text=user_message, n_results=2)
+                if retrieved_info and retrieved_info.get('documents') and retrieved_info['documents'][0] and retrieved_info['documents'][0][0]: # Check if there's actual document content
+                    context_from_db = " ".join(retrieved_info['documents'][0])
+                    enriched_user_message = f"Context from knowledge base: {context_from_db}\n\nUser message: {user_message}"
+                    logging.info(f"Retrieved context for user message: '{user_message[:50]}...' - Context: '{context_from_db[:100]}...'")
+                else:
+                    logging.info(f"No relevant documents found in VectorDB for user message: '{user_message[:50]}...'")
+            except Exception as e:
+                logging.error(f"Error querying VectorDB: {e}")
+                # Keep user_message as is, or handle error as appropriate
+        else:
+            logging.warning("Skipping VectorDB query as collection is not initialized.")
+
         # Send request to OpenAI API
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": enriched_user_message}
         ]
 
         response = client.chat.completions.create(
@@ -66,6 +98,7 @@ def chat():
         return jsonify({"response": bot_response})
     
     except Exception as e:
+        logging.error(f"Error in /chat endpoint: {e}", exc_info=True) # Log full traceback
         return jsonify({"error": str(e)}), 500
 
 # Add a simple health check endpoint

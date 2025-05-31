@@ -1,4 +1,5 @@
-opoenai
+openai
 python-dotenv
 flask
 flask-cors
+chromadb
